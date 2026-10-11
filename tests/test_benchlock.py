@@ -20,7 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.benchlock import (  # noqa: E402
     BenchlockError,
+    at_displayed_precision,
     check,
+    displayed_decimals,
     find_markers,
     flatten,
     format_like,
@@ -105,6 +107,44 @@ def test_tolerance_longest_prefix_wins():
 def test_unknown_key_has_no_tolerance():
     with pytest.raises(BenchlockError, match="no tolerance declared"):
         tolerance_for("something.invented")
+
+
+# ------------------------------------------------------- displayed precision
+
+
+def test_displayed_decimals():
+    assert displayed_decimals("0.4030") == 4
+    assert displayed_decimals("2.1") == 1
+    assert displayed_decimals("10000") is None
+    assert displayed_decimals("32.0x") == 1
+    assert displayed_decimals("48.4%") == 1
+    assert displayed_decimals(" 10,000 ") is None
+
+
+def test_at_displayed_precision_rounds_to_what_the_readme_prints():
+    assert at_displayed_precision(2.0531, "2.1") == 2.1
+    assert at_displayed_precision(2.0531, "2.05") == 2.05
+    assert at_displayed_precision(2.0531, "2") == 2.0
+    assert at_displayed_precision(0.7, "0.7000") == 0.7
+
+
+def test_zero_tolerance_survives_display_rounding(flat):
+    """A README showing one decimal cannot be expected to equal 2.0531 exactly.
+    Rounding the measured value to the committed precision is what lets byte
+    ratios keep a genuinely zero tolerance without forcing an ugly document."""
+    metrics = flatten({"memory": {"compression_ratio": 2.0531}})
+    assert check("<!--bench:memory.compression_ratio-->2.1<!--/bench-->", metrics) == []
+    assert check("<!--bench:memory.compression_ratio-->2.05<!--/bench-->", metrics) == []
+    # Rounding is not a licence to be wrong: a genuinely different value at the
+    # same precision still fails.
+    assert len(check("<!--bench:memory.compression_ratio-->2.6<!--/bench-->", metrics)) == 1
+
+
+def test_display_rounding_does_not_mask_real_drift(flat):
+    """Two decimal places shown means two decimal places enforced."""
+    metrics = flatten({"recall": {"nprobe8": 0.70}})
+    assert check("<!--bench:recall.nprobe8-->0.70<!--/bench-->", metrics) == []
+    assert len(check("<!--bench:recall.nprobe8-->0.40<!--/bench-->", metrics)) == 1
 
 
 # --------------------------------------------------------------------- check

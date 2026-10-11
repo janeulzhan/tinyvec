@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: tests (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Report environment
+        run: |
+          python -c "import sys, numpy; print(sys.version); print('numpy', numpy.__version__)"
+
+      # The dataset is vendored, so nothing here touches the network.
+      - name: Tests
+        run: python -m pytest -m "not slow" -q
+
+  gates:
+    name: deterministic gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      # Checks every locked number in the README against the committed
+      # bench/metrics.json. Does not rerun the benchmark, so it gates document
+      # consistency rather than machine speed. Wall-clock keys are refused by
+      # the tool itself.
+      - name: benchlock (README matches committed metrics)
+        run: python tools/benchlock.py --check
+
+      # The recall floor test re-measures recall on this runner against
+      # declared floors. This is the gate that would actually catch a retrieval
+      # regression, and it is deterministic because the dataset, the index
+      # parameters and the seed are all fixed.
+      - name: Recall regression floors
+        run: python -m pytest tests/test_recall_floor.py -q
+
+      # Proves the harness still runs end to end. Its timings are not asserted
+      # on: see the README section on what CI gates and why.
+      # Writes to a scratch path so the committed results.csv, which records a
+      # full 10-run sweep on disclosed hardware, is never overwritten by a
+      # 2-run smoke sweep on a shared runner.
+      - name: Benchmark harness smoke run
+        run: python bench/bench.py --quick --runs 2 --csv "${{ runner.temp }}/smoke.csv"
+
+      - name: Confirm the working tree is clean
+        run: git diff --exit-code

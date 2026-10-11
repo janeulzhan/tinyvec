@@ -146,6 +146,31 @@ def find_markers(text: str) -> list[tuple[str, str]]:
     return spans
 
 
+def displayed_decimals(raw: str) -> int | None:
+    """Decimal places the README shows for a value, or None if it shows none."""
+    stripped = raw.strip().replace(",", "").rstrip("x%")
+    if "." not in stripped:
+        return None
+    return len(stripped.split(".", 1)[1])
+
+
+def at_displayed_precision(measured: float, raw: str) -> float:
+    """Round ``measured`` to the precision the README actually prints.
+
+    A README showing "2.1" cannot be expected to equal 2.0531 exactly, and
+    demanding that it does would force either an ugly full-precision document
+    or a tolerance that also hides real drift. The question a document lock
+    should ask is whether the *displayed* number still round-trips, so the
+    measured value is rounded to the committed value's own precision before any
+    comparison. Zero-tolerance keys then stay genuinely exact at the precision
+    they claim.
+    """
+    decimals = displayed_decimals(raw)
+    if decimals is None:
+        return float(round(measured))
+    return round(float(measured), decimals)
+
+
 def parse_committed(key: str, raw: str) -> float:
     cleaned = raw.strip().replace(",", "").replace("x", "").replace("%", "")
     try:
@@ -223,7 +248,7 @@ def check(text: str, metrics: dict[str, float]) -> list[Drift]:
             )
         committed = parse_committed(key, raw)
         tol = tolerance_for(key)
-        drift = Drift(key, committed, metrics[key], tol)
+        drift = Drift(key, committed, at_displayed_precision(metrics[key], raw), tol)
         if drift.relative > tol:
             drifts.append(drift)
     return drifts
