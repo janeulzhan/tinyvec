@@ -33,6 +33,17 @@ def test_squared_distances_rejects_dimension_mismatch():
         squared_distances(np.zeros((3, 4), np.float32), np.zeros((3, 5), np.float32))
 
 
+# Lloyd is exactly monotone in theory, and measured exactly monotone here: the
+# worst relative increase across 500 seeds of the two fixtures below was 0.0.
+# The bound is nevertheless relative rather than exactly zero, because centroid
+# means are rounded to float32 on store, so a centroid is not precisely its
+# cluster's inertia minimizer and an increase of order float32 epsilon is
+# mechanically possible. 1e-9 is tight enough to catch any real regression while
+# leaving room for that. An earlier absolute bound of 1e-3 was, on an inertia of
+# 0.03, a 3 percent allowance.
+MONOTONICITY_RELATIVE_SLACK = 1e-9
+
+
 def test_inertia_is_non_increasing():
     """Pure Lloyd must never increase inertia. This is the invariant that an
     empty-cluster 'repair' would silently break."""
@@ -44,18 +55,84 @@ def test_inertia_is_non_increasing():
     history = np.array(result.inertia_history)
     assert len(history) >= 2
     deltas = np.diff(history)
-    assert np.all(deltas <= 1e-3), f"inertia increased: {deltas[deltas > 0]}"
+    slack = MONOTONICITY_RELATIVE_SLACK * max(history[0], 1.0)
+    assert np.all(deltas <= slack), f"inertia increased: {deltas[deltas > 0]}"
 
 
-def test_inertia_is_non_increasing_when_clusters_go_empty():
-    """Many centroids over few distinct clumps is the case that strains the
-    empty-cluster path. Monotonicity must still hold."""
+@pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
+def test_inertia_is_non_increasing_when_clusters_go_empty(seed):
+    """Many centroids over few clumps is the case that strains the empty-cluster
+    path. Monotonicity must still hold.
+
+    The clumps sit near the origin with noise that is a real fraction of their
+    separation, which keeps the assignment step inside the regime where it can
+    actually resolve the nearest centroid. An earlier version of this test used
+    clumps of radius 0.01 centred 20 units out, where squared_distances carries
+    71 percent relative error on the distances that matter; Lloyd's monotonicity
+    does not hold when the argmin is that unreliable, and the test passed on one
+    BLAS and failed on another. See test_precision_limit_of_the_expansion below,
+    which pins that behaviour deliberately instead.
+    """
+    rng = np.random.default_rng(seed)
+    clumps = rng.normal(size=(3, 5)).astype(np.float32) * 2.0
+    x = np.repeat(clumps, 40, axis=0) + rng.normal(scale=0.3, size=(120, 5)).astype(np.float32)
+    result = kmeans(x, 30, n_iter=30, seed=seed + 7, tol=0.0)
+    history = np.array(result.inertia_history)
+    deltas = np.diff(history)
+    # Inertia is computed from direct float64 residuals, so the only slack
+    # needed is for an argmin that float32 may resolve differently; scale it to
+    # the inertia itself rather than using an absolute epsilon.
+    slack = MONOTONICITY_RELATIVE_SLACK * max(history[0], 1.0)
+    assert np.all(deltas <= slack), deltas[deltas > 0]
+
+
+def test_precision_limit_of_the_expansion():
+    """Pin the documented failure regime rather than leaving it implicit.
+
+    Tight clusters far from the origin make the |a|^2 - 2a.b + |b|^2 expansion
+    lose essentially all relative accuracy on small distances, because it
+    subtracts quantities of size |a|^2 to produce a result of size |a - b|^2.
+    This asserts the limit exists and that the well-conditioned case is fine, so
+    that anyone reading squared_distances' docstring can see it is measured.
+    """
+    rng = np.random.default_rng(0)
+
+    def relative_error(offset: float, noise: float) -> float:
+        centers = (rng.normal(size=(3, 5)) * offset).astype(np.float32)
+        x = (
+            np.repeat(centers, 40, axis=0) + rng.normal(scale=noise, size=(120, 5))
+        ).astype(np.float32)
+        got = squared_distances(x, centers)
+        want = (
+            (x.astype(np.float64)[:, None, :] - centers.astype(np.float64)[None, :, :]) ** 2
+        ).sum(-1)
+        near = want < np.percentile(want, 30)
+        return float(np.abs(got - want)[near].max() / max(want[near].max(), 1e-12))
+
+    pathological = relative_error(offset=20.0, noise=0.01)
+    well_conditioned = relative_error(offset=0.0, noise=1.0)
+    assert pathological > 0.1, pathological
+    assert well_conditioned < 1e-6, well_conditioned
+
+
+def test_inertia_is_computed_exactly_not_from_the_expansion():
+    """Inertia must come from direct residuals, so it stays accurate even where
+    the assignment distances do not. Checked against an independent float64
+    computation on deliberately ill-conditioned data."""
     rng = np.random.default_rng(2)
     clumps = rng.normal(size=(3, 5)).astype(np.float32) * 20.0
     x = np.repeat(clumps, 40, axis=0) + rng.normal(scale=0.01, size=(120, 5)).astype(np.float32)
     result = kmeans(x, 30, n_iter=30, seed=3, tol=0.0)
-    deltas = np.diff(np.array(result.inertia_history))
-    assert np.all(deltas <= 1e-3)
+    independent = float(
+        (
+            (x.astype(np.float64) - result.centroids[result.labels].astype(np.float64)) ** 2
+        ).sum()
+    )
+    assert result.inertia == pytest.approx(independent, rel=1e-9)
+    # The expanded distances disagree with the truth by an amount comparable to
+    # the inertia itself here, which is exactly why they are not used for it.
+    _, expanded = assign(x, result.centroids)
+    assert abs(float(expanded.sum()) - independent) > 1e-4
 
 
 def test_converges_to_planted_clusters():

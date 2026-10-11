@@ -9,6 +9,12 @@ same three properties, so they are guaranteed here rather than at the call site:
    the usual way to lose it is an empty-cluster "repair" that teleports a
    centroid somewhere inertia-increasing, so this implementation leaves an empty
    cluster's centroid exactly where it was instead.
+
+   This guarantee is conditional on the assignment step actually finding the
+   nearest centroid, which is not free: see :func:`squared_distances` for the
+   regime where float32 cancellation makes that step unreliable. Inertia itself
+   is computed from direct residuals rather than from the expanded distances, so
+   the reported numbers stay accurate even when the assignment does not.
 3. ``k`` larger than the number of distinct rows is not an error. The number of
    returned centroids is clamped to the number of distinct rows, because asking
    for more centroids than there are distinct points has no solution with
@@ -52,6 +58,26 @@ def squared_distances(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     into one GEMM. That expansion can go slightly negative on near-identical
     vectors through floating-point cancellation, so the result is clipped at
     zero; callers that take a square root would otherwise get a NaN.
+
+    Precision limit, which is worth knowing before trusting a small distance:
+    the expansion subtracts quantities of size ``|a|^2`` to produce a result of
+    size ``|a - b|^2``, so it loses relative accuracy as ``|a|, |b|`` grow
+    against ``|a - b|``. Measured relative error on the smallest 30 percent of
+    distances, float32, for 5-dimensional clusters of radius ``noise`` centred
+    at radius ``offset`` from the origin:
+
+        offset  noise   mean |x|^2   true d^2   relative error
+          20.0   0.01       1728.2   9.47e-04         7.09e-01
+          20.0   0.10       1727.5   9.47e-02         6.10e-03
+          20.0   1.00       1724.8   9.47e+00         8.64e-05
+           2.0   0.30         17.5   8.52e-01         6.01e-06
+           0.0   1.00          5.0   3.04e+00         9.27e-08
+
+    The first row is not a usable distance. Tight clusters far from the origin
+    are the pathological case, and for data of that shape the fix is to centre
+    it first, since distances are translation invariant. Real embedding data
+    (SIFT included) sits near the well-conditioned end, which is why this is a
+    documented limit rather than a blocking defect.
 
     Args:
         a: ``(n, d)`` array.
@@ -122,6 +148,28 @@ def _group_sums(x: np.ndarray, labels: np.ndarray, k: int) -> np.ndarray:
     return sums
 
 
+def _exact_inertia(
+    x: np.ndarray, centroids: np.ndarray, labels: np.ndarray, chunk: int = 8192
+) -> float:
+    """Sum of squared distances from each point to its assigned centroid.
+
+    Computed from direct residuals in float64 rather than reusing the distances
+    that :func:`assign` already produced. Those come from the GEMM expansion and
+    carry its cancellation error, which on tightly clustered data far from the
+    origin can be the same order as the inertia being reported. One extra
+    O(n * d) pass is cheap next to the O(n * k * d) assignment, and it buys an
+    inertia number that means what it says.
+    """
+    total = 0.0
+    for start in range(0, x.shape[0], chunk):
+        stop = min(start + chunk, x.shape[0])
+        residual = x[start:stop].astype(np.float64) - centroids[labels[start:stop]].astype(
+            np.float64
+        )
+        total += float(np.einsum("ij,ij->", residual, residual))
+    return total
+
+
 def _kmeans_plusplus(x: np.ndarray, k: int, rng: np.random.Generator) -> np.ndarray:
     """k-means++ seeding (Arthur and Vassilvitskii, 2007).
 
@@ -189,8 +237,8 @@ def kmeans(
 
     history: list[float] = []
     iterations = 0
-    labels, best = assign(x, centroids)
-    history.append(float(best.sum()))
+    labels, _ = assign(x, centroids)
+    history.append(_exact_inertia(x, centroids, labels))
 
     for _ in range(n_iter):
         iterations += 1
@@ -203,8 +251,8 @@ def kmeans(
         centroids = centroids.copy()
         centroids[occupied] = sums[occupied] / counts[occupied, None].astype(np.float32)
 
-        labels, best = assign(x, centroids)
-        inertia = float(best.sum())
+        labels, _ = assign(x, centroids)
+        inertia = _exact_inertia(x, centroids, labels)
         previous = history[-1]
         history.append(inertia)
         if previous > 0.0 and (previous - inertia) / previous < tol:
