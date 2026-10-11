@@ -154,7 +154,7 @@ git clone https://github.com/janeulzhan/tinyvec.git
 cd tinyvec
 python3 -m pip install -e ".[dev]"
 
-python3 -m pytest -m "not slow" -q      # 230 tests
+python3 -m pytest -m "not slow" -q      # 231 tests
 tinyvec info                            # describe the vendored dataset
 tinyvec bench --nprobe 1,4,16,64        # recall and QPS sweep
 ```
@@ -289,23 +289,38 @@ files, not a subsample, and it gets the corpus to 3.4 MB.
 `scripts/download_siftsmall.py` re-derives it from the INRIA tarball and checks
 its SHA-256, so the vendored copy is verifiable rather than merely asserted.
 
-The in-repo brute force was validated against the published ground truth on two
-counts: the returned neighbour sets agree at every k from 1 to 100, and the
-sequence of distances is identical, exactly and not approximately. The second is
-the stronger claim, and it is the one that survives ties.
+The in-repo brute force reproduces the published ground truth exactly, except at
+exact distance ties, where no ordering is canonical. Three things are asserted,
+and together they are stronger than a positional comparison would be:
 
-Exact id ordering is not claimed, because it is not portable. Where two base
-vectors sit at the same distance from a query, which sorts first depends on
-float32 accumulation order and so on the BLAS build; 18 of 10,000 cells permute
-on the authoring machine and a different number will on yours.
-`tests/test_exact.py` asserts the property rather than the count: any id that
-differs from the published file must be a vector at exactly the same distance.
-An earlier version pinned the ordering to k=20, which passed locally and failed
-in CI on Linux.
+- Neighbour **sets** agree at every k from 1 to 100. Tie-independent.
+- The sequence of **distances** is identical, exactly, maximum absolute
+  difference 0.0. This is the claim that catches a genuinely wrong neighbour,
+  since any substitution of an unequal vector would move a distance.
+- Every positional id difference is an **exact** tie, and the **count** of
+  permuted cells is bounded at 200 of 10,000 and reported on failure, so a
+  regression that reorders unequal neighbours fails loudly rather than hiding
+  behind the tie exemption.
 
-The tie margin at k=10 is 6.0 squared units, which is comfortably positive, so
-recall@10 on this dataset is a well-defined quantity. That check runs before any
-recall number is reported.
+Exact id ordering is deliberately not asserted, because it is not portable: when
+two vectors are equidistant, which one sorts first depends on float32
+accumulation order and therefore on the BLAS build. 18 of 10,000 cells permute
+on the authoring machine; Python 3.11 happened to agree with the published file
+while 3.10 and 3.12 did not. An earlier version of this test pinned the ordering
+to k=20 and failed in CI for exactly that reason.
+
+Exact equality rather than a tolerance is the right test for a tie here, and
+SIFT makes that provable. Descriptors are uint8, so squared distances are
+integers, the largest being 513,065, well under the 2^24 where float32 stops
+representing integers exactly. Measured float32 error against a float64
+reference on this data is 0.0, and the smallest non-zero gap between adjacent
+distances in the top 100 is exactly 1.0. Two distances are therefore either
+identical or at least 1.0 apart, with no near-tie band in between. A separate
+test pins those properties, since the reasoning depends on them.
+
+The tie margin at k=10 is 6.0 squared units, comfortably positive, so recall@10
+on this dataset is a well-defined quantity. That check runs before any recall
+number is reported.
 
 ## What CI gates, and what it does not
 
@@ -411,7 +426,7 @@ tinyvec/datasets.py  vendored SIFT-small loader, synthetic generator
 tinyvec/cli.py       build / query / bench / info
 bench/bench.py       the disclosed benchmark; bench/results.csv is its output
 tools/benchlock.py   locks this README's numbers to bench/metrics.json
-tests/               230 tests; test_adc.py is the one that matters most
+tests/               231 tests; test_adc.py is the one that matters most
 ```
 
 `tests/test_adc.py` is worth opening first. The entire index rests on the claim

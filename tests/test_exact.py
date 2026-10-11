@@ -203,23 +203,82 @@ def test_reproduces_published_siftsmall_groundtruth():
         assert np.array_equal(ours, theirs), qi
 
 
+# Upper bound on how many of the 100 x 100 ground-truth cells may sit in a
+# different order than the published file. Exactly 18 permute on the authoring
+# machine; tie-break order varies by BLAS build so the exact count is not
+# portable, but a pathological reordering should still fail loudly. 200 cells is
+# 2 percent of the grid, roughly 11x the observed value.
+MAX_PERMUTED_CELLS = 200
+
+
 def test_every_disagreement_with_published_groundtruth_is_a_distance_tie():
     """Any id we return that differs from the published file must be a vector at
     exactly the same distance, never a genuinely different neighbour.
 
-    How many cells differ, and whether any differ at all, depends on tie-break
-    order and so varies by platform (18 of 10,000 on the authoring machine).
-    That count is therefore not asserted; only the property is.
+    Exact equality is the right comparison here, not a tolerance, and SIFT makes
+    that provable rather than hopeful. Descriptors are uint8, so squared
+    distances are integers; the largest is 513,065, comfortably under the 2^24
+    beyond which float32 stops representing integers exactly. Measured float32
+    error against a float64 reference on this dataset is 0.0, and the smallest
+    non-zero gap between adjacent distances in the top 100 is exactly 1.0. Two
+    distances here are therefore either identical or at least 1.0 apart, with no
+    near-tie band in between, so a tie is unambiguous and a tolerance would only
+    blur a distinction the data does not actually contain.
+
+    The permuted-cell count is asserted as a bound and reported on failure, so a
+    regression that reorders genuinely unequal neighbours cannot hide behind the
+    tie exemption.
     """
     ds = load_siftsmall()
     ids, _ = brute_force(ds.base, ds.queries, 100)
     base = ds.base.astype(np.float64)
     mismatches = np.argwhere(ids != ds.groundtruth)
+
+    genuine: list[str] = []
     for qi, col in mismatches:
         q = ds.queries[qi].astype(np.float64)
         ours = ((base[ids[qi, col]] - q) ** 2).sum()
         theirs = ((base[ds.groundtruth[qi, col]] - q) ** 2).sum()
-        assert ours == theirs, f"real disagreement at query {qi} rank {col}"
+        if ours != theirs:
+            genuine.append(
+                f"query {qi} rank {col}: ours {ids[qi, col]} at {ours:.1f}, "
+                f"published {ds.groundtruth[qi, col]} at {theirs:.1f}"
+            )
+
+    assert not genuine, (
+        f"{len(genuine)} of {len(mismatches)} positional differences are NOT "
+        f"distance ties, so the search returned genuinely wrong neighbours:\n  "
+        + "\n  ".join(genuine[:10])
+    )
+    assert len(mismatches) <= MAX_PERMUTED_CELLS, (
+        f"{len(mismatches)} of {ids.size} ground-truth cells are permuted "
+        f"against the published file, over the bound of {MAX_PERMUTED_CELLS}. "
+        f"Every one is an exact distance tie, so this is not a correctness "
+        f"failure, but the jump is large enough to warrant a look at the "
+        f"sort's tie-breaking before raising the bound."
+    )
+
+
+def test_siftsmall_distances_are_integers_so_ties_are_unambiguous():
+    """Underpins the exact-equality comparison used above.
+
+    If this ever stops holding, tie detection needs a tolerance and the
+    reasoning in this file has to be revisited.
+    """
+    ds = load_siftsmall()
+    _, dists = brute_force(ds.base, ds.queries, 100)
+    exact = np.stack(
+        [
+            ((ds.base.astype(np.float64) - ds.queries[qi].astype(np.float64)) ** 2).sum(axis=1)
+            for qi in range(ds.queries.shape[0])
+        ]
+    )
+    assert np.all(exact == np.round(exact)), "squared distances are not integral"
+    assert exact.max() < 2**24, "distances exceed exact float32 integer range"
+    # float32 computation is exact on this data, so returned distances match.
+    assert np.array_equal(dists.astype(np.float64), np.sort(exact, axis=1)[:, :100])
+    gaps = np.diff(np.sort(exact, axis=1)[:, :101], axis=1)
+    assert gaps[gaps > 0].min() >= 1.0, "found a sub-unit non-zero gap"
 
 
 def test_siftsmall_top10_groundtruth_is_unambiguous():
