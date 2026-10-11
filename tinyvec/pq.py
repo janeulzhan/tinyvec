@@ -64,6 +64,7 @@ class ProductQuantizer:
         self.codebooks: np.ndarray | None = None
         self.dim: int | None = None
         self.dsub: int | None = None
+        self._subspace_index = np.arange(self.m)
 
     @property
     def is_fitted(self) -> bool:
@@ -167,6 +168,44 @@ class ProductQuantizer:
         approx = self.decode(self.encode(x))
         return float(np.mean(np.sum((x - approx) ** 2, axis=1)))
 
+    @property
+    def codebook_sq_norms(self) -> np.ndarray:
+        """``(m, ksub)`` squared norms of every codebook entry.
+
+        One of the three terms the precomputed-table decomposition in
+        :mod:`tinyvec.index` needs. Depends on neither the query nor the coarse
+        centroid, so it is computed on demand and reused.
+        """
+        codebooks = self._require_fitted()
+        return np.ascontiguousarray(np.einsum("jkl,jkl->jk", codebooks, codebooks))
+
+    def subspace_dots(self, vectors: np.ndarray) -> np.ndarray:
+        """Inner products between each subvector and every codebook entry.
+
+        Args:
+            vectors: ``(n, d)`` or ``(d,)`` vectors.
+
+        Returns:
+            ``(n, m, ksub)`` float32 where ``out[i, j, c]`` is
+            ``vectors[i, block j] . codebooks[j, c]``.
+
+        This is the only query-dependent term in the precomputed-table
+        decomposition, which is what lets the per-list table build collapse to a
+        single array addition.
+        """
+        codebooks = self._require_fitted()
+        vectors = np.ascontiguousarray(vectors, dtype=np.float32)
+        if vectors.ndim == 1:
+            vectors = vectors[None, :]
+        if vectors.ndim != 2 or vectors.shape[1] != self.dim:
+            raise ValueError(f"expected (n, {self.dim}) input, got shape {vectors.shape}")
+        assert self.dsub is not None
+        out = np.empty((vectors.shape[0], self.m, self.ksub), dtype=np.float32)
+        for j in range(self.m):
+            sub = vectors[:, j * self.dsub : (j + 1) * self.dsub]
+            out[:, j, :] = sub @ codebooks[j].T
+        return out
+
     def distance_tables(self, queries: np.ndarray) -> np.ndarray:
         """Precompute asymmetric distance lookup tables.
 
@@ -192,21 +231,47 @@ class ProductQuantizer:
             tables[:, j, :] = squared_distances(sub, codebooks[j])
         return tables
 
-    def adc(self, codes: np.ndarray, table: np.ndarray) -> np.ndarray:
+    # Measured gather crossover on Apple M4 / numpy 2.4.6, m=16, single-threaded.
+    # Microseconds per scan of n candidates, best of 7 trials:
+    #
+    #        n     loop   fancy          n     loop   fancy
+    #       32    10.09    2.88        512    19.25   30.18
+    #       64    11.16    4.34       1024    27.59   61.08
+    #      128    12.45    7.53       2048    44.92  102.43
+    #      256    14.82   14.04      20000   359.79  945.25
+    #
+    # Short lists are dominated by per-call numpy overhead, so the single
+    # fancy-index gather (one call) wins. Long lists are dominated by memory
+    # traffic, so the per-subspace loop wins because it never materializes the
+    # (n, m) gathered temporary. The crossover sat between 256 and 512 in every
+    # repetition, so the threshold is placed at 512. IVF lists are usually far
+    # below it, which is why the short-list path is the one that matters here.
+    ADC_LOOP_THRESHOLD = 512
+
+    def adc(
+        self, codes: np.ndarray, table: np.ndarray, *, method: str = "auto"
+    ) -> np.ndarray:
         """Score PQ codes against one query's lookup table.
 
-        This is the hot loop of the whole index. It accumulates one subspace at
-        a time rather than gathering the full ``(n, m)`` block in a single fancy
-        index. Each step is a 1-D gather against a 256-entry float32 table, which
-        is 1 KB and so stays in L1 for the whole pass over the list, and the
-        running sum is updated in place so no ``(n, m)`` temporary is ever
-        materialized. The alternative, ``table[arange(m), codes].sum(axis=1)``,
-        allocates exactly that temporary.
+        This is the hot loop of the whole index. Two implementations of the same
+        arithmetic are kept because their costs cross over with list length; see
+        ``ADC_LOOP_THRESHOLD`` above for the measurements.
+
+        ``"loop"`` accumulates one subspace at a time. Each step is a 1-D gather
+        against a 256-entry float32 table, which is 1 KB and stays in L1 for the
+        whole pass, and the running sum is updated in place so no ``(n, m)``
+        temporary is ever allocated.
+
+        ``"fancy"`` does the whole gather in a single ``table[arange(m), codes]``
+        and then one row sum. It allocates that temporary, but it is one numpy
+        call instead of ``m`` of them, which is what matters on a short list.
 
         Args:
             codes: ``(n, m)`` uint8 codes.
             table: ``(m, ksub)`` table for a single query, from
                 :meth:`distance_tables`.
+            method: ``"auto"``, ``"loop"``, or ``"fancy"``. The two explicit
+                modes exist so tests can assert they agree.
 
         Returns:
             ``(n,)`` float32 approximate squared distances.
@@ -217,9 +282,18 @@ class ProductQuantizer:
             raise ValueError(f"expected (n, {self.m}) codes, got shape {codes.shape}")
         if table.shape != (self.m, self.ksub):
             raise ValueError(f"expected ({self.m}, {self.ksub}) table, got {table.shape}")
-        if codes.shape[0] == 0:
+        if method not in ("auto", "loop", "fancy"):
+            raise ValueError(f"method must be auto, loop or fancy, got {method!r}")
+        n = codes.shape[0]
+        if n == 0:
             return np.empty(0, dtype=np.float32)
+
         table = np.ascontiguousarray(table, dtype=np.float32)
+        if method == "auto":
+            method = "loop" if n >= self.ADC_LOOP_THRESHOLD else "fancy"
+
+        if method == "fancy":
+            return table[self._subspace_index, codes].sum(axis=1, dtype=np.float32)
         out = table[0][codes[:, 0]].astype(np.float32, copy=True)
         for j in range(1, self.m):
             out += table[j][codes[:, j]]

@@ -24,6 +24,25 @@ on ``q - centroid_l`` and must be recomputed for each probed list. That is
 ``nprobe`` table builds per query instead of one, which is why ``nlist`` cannot
 be made arbitrarily large for free.
 
+Encoding residuals costs a per-list table rebuild, and naively that rebuild is
+``m`` small matrix products per probed list, which at ``nprobe`` lists per query
+dominates everything else. It is avoidable. Expand the distance to a stored
+vector ``c_l + r`` where ``r`` is the decoded residual:
+
+    d(q, c_l + r) = ||q - c_l||^2 + sum_j ( ||C_j[code_j]||^2
+                                            + 2 c_l,j . C_j[code_j]
+                                            - 2 q_j . C_j[code_j] )
+
+The first term is already known: it is the coarse distance computed when
+choosing which lists to probe. Of the three terms in the sum, the first two
+depend only on the codebooks and the coarse centroids, so they can be computed
+once at build time into an ``(nlist, m, 256)`` table. The third depends only on
+the query, so it is one ``(m, 256)`` build per query rather than per list. The
+per-list table is then a single array addition instead of ``m`` matrix products.
+That is what ``precompute_tables=True`` does, and it costs
+``nlist * m * 256 * 4`` bytes: 2.1 MB at nlist=128, m=16. It changes no
+arithmetic, so recall is identical either way, which the tests assert directly.
+
 An optional reranking stage closes most of the PQ ranking gap. ADC picks the top
 ``rerank`` candidates, then those few are rescored with exact float32 distances
 against the original vectors. Because ``rerank`` is tiny next to the scanned set,
@@ -97,6 +116,9 @@ class IVFPQIndex:
             Requires ``store_vectors=True``.
         store_vectors: Keep a float32 copy of the base vectors to enable exact
             reranking. Set False to keep only the PQ codes.
+        precompute_tables: Trade ``nlist * m * 256 * 4`` bytes for a per-list
+            table build that is one array addition instead of ``m`` matrix
+            products. Mathematically identical results either way.
         kmeans_iter: Lloyd iterations for both the coarse and the PQ codebooks.
         seed: Fixes the entire build. Two fits with the same seed and the same
             input produce byte-identical codes and centroids.
@@ -114,6 +136,7 @@ class IVFPQIndex:
         nprobe: int = 8,
         rerank: int = 0,
         store_vectors: bool = True,
+        precompute_tables: bool = True,
         kmeans_iter: int = 25,
         seed: int = 0,
     ) -> None:
@@ -130,6 +153,7 @@ class IVFPQIndex:
         self.nprobe = int(nprobe)
         self.rerank = int(rerank)
         self.store_vectors = bool(store_vectors)
+        self.precompute_tables = bool(precompute_tables)
         self.kmeans_iter = int(kmeans_iter)
         self.seed = int(seed)
         self.pq = ProductQuantizer(m, nbits=nbits, n_iter=kmeans_iter, seed=seed + 1_000)
@@ -137,6 +161,7 @@ class IVFPQIndex:
         self.centroids: np.ndarray | None = None
         self.lists: list[_InvertedList] = []
         self.vectors: np.ndarray | None = None
+        self._precomputed: np.ndarray | None = None
         self.dim: int | None = None
         self.ntotal: int = 0
         self.last_stats = SearchStats()
@@ -209,6 +234,15 @@ class IVFPQIndex:
             )
             for i in range(n_lists)
         ]
+
+        if self.precompute_tables:
+            # PRE[l, j, c] = ||C_j[c]||^2 + 2 * centroid_l,j . C_j[c]
+            self._precomputed = np.ascontiguousarray(
+                self.pq.codebook_sq_norms[None, :, :]
+                + 2.0 * self.pq.subspace_dots(self.centroids)
+            )
+        else:
+            self._precomputed = None
 
         self.vectors = base.copy() if self.store_vectors else None
         return self
@@ -284,6 +318,12 @@ class IVFPQIndex:
             part_d = np.take_along_axis(coarse_d, part, axis=1)
             probe_ids = np.take_along_axis(part, np.argsort(part_d, axis=1), axis=1)
 
+        # The only query-dependent term of the precomputed decomposition, built
+        # once per query for the whole batch rather than once per probed list.
+        query_terms = None
+        if self._precomputed is not None:
+            query_terms = -2.0 * self.pq.subspace_dots(queries)
+
         for qi in range(nq):
             query = queries[qi]
             cand_ids: list[np.ndarray] = []
@@ -293,12 +333,22 @@ class IVFPQIndex:
                 entry = self.lists[list_id]
                 if entry.ids.size == 0:
                     continue
-                # The residual query for this cell. This is why the table is
-                # rebuilt per probed list rather than once per query.
-                residual_query = query - self.centroids[list_id]
-                table = self.pq.distance_tables(residual_query[None, :])[0]
+                if query_terms is not None:
+                    # One array addition, plus the already-known coarse term.
+                    table = self._precomputed[list_id] + query_terms[qi]
+                    offset = coarse_d[qi, list_id]
+                else:
+                    # Reference path: build the residual query's table directly.
+                    # Same arithmetic, m matrix products instead of one add.
+                    table = self.pq.distance_tables(
+                        (query - self.centroids[list_id])[None, :]
+                    )[0]
+                    offset = 0.0
                 stats.tables_built += 1
-                cand_dists.append(self.pq.adc(entry.codes, table))
+                scored = self.pq.adc(entry.codes, table)
+                if offset:
+                    scored = scored + offset
+                cand_dists.append(scored)
                 cand_ids.append(entry.ids)
                 stats.candidates_scanned += int(entry.ids.size)
             stats.lists_probed += int(probe_ids[qi].size)
@@ -361,7 +411,8 @@ class IVFPQIndex:
         ids = 4.0 * self.ntotal
         codebooks = float(self.pq.codebooks.nbytes) if self.pq.codebooks is not None else 0.0
         centroids = float(self.centroids.nbytes)
-        overhead = codebooks + centroids
+        precomputed = float(self._precomputed.nbytes) if self._precomputed is not None else 0.0
+        overhead = codebooks + centroids + precomputed
         return {
             "n": float(self.ntotal),
             "dim": float(self.dim),
@@ -370,6 +421,7 @@ class IVFPQIndex:
             "id_bytes": ids,
             "codebook_bytes": codebooks,
             "coarse_centroid_bytes": centroids,
+            "precomputed_table_bytes": precomputed,
             "index_bytes_excluding_vectors": codes + ids + overhead,
             "compression_ratio": original / codes,
             "compression_ratio_with_overhead": original / (codes + ids + overhead),
@@ -384,5 +436,6 @@ class IVFPQIndex:
         state = f"ntotal={self.ntotal}, dim={self.dim}" if self.is_fitted else "unfitted"
         return (
             f"IVFPQIndex(nlist={self.nlist}, m={self.pq.m}, nbits={self.pq.nbits}, "
-            f"nprobe={self.nprobe}, rerank={self.rerank}, {state})"
+            f"nprobe={self.nprobe}, rerank={self.rerank}, "
+            f"precompute={self.precompute_tables}, {state})"
         )
