@@ -1,0 +1,46 @@
+"# tinyvec IVF-PQ benchmark, raw results"
+# cpu,Apple M4
+# physical_cores,10
+# logical_cores,10
+# memory,16 GiB (17179869184 bytes)
+# platform,macOS-15.5-arm64-arm-64bit
+# machine,arm64
+# python,3.11.9
+# numpy,2.4.6
+# blas_threads_pinned_to,1
+# dataset,sift-small (real): n=10000 dim=128 queries=100 train=25000 metric=euclidean
+# dataset_source,"INRIA TEXMEX SIFT-small, real measured descriptors"
+# k,10
+# nlist,128,m,16,nbits,8,seed,42,kmeans_iter,25
+# timed_runs,10,warmup_runs,1
+# build_seconds,6.6293
+# compression_ratio_codes_only,32.0
+# compression_ratio_with_overhead,2.0531
+# residual_reconstruction_error,12071.0557
+# single_threaded,True
+config,nprobe,rerank,recall_at_10,qps_mean,qps_stddev,latency_ms_mean,candidates_per_query,lists_probed_per_query,tables_built_per_query,fraction_of_database_scanned
+adc,1,0,0.403,68553.2,1455.61,0.0146,92.14,1.0,1.0,0.009214
+adc,2,0,0.548,43525.23,1219.08,0.023,176.92,2.0,2.0,0.017692
+adc,4,0,0.648,24901.69,862.55,0.0402,343.31,4.0,4.0,0.034331
+adc,8,0,0.7,13960.09,161.24,0.0716,665.55,8.0,8.0,0.066555
+adc,16,0,0.723,7203.19,130.79,0.1389,1304.53,16.0,16.0,0.130453
+adc,32,0,0.724,3793.61,31.39,0.2636,2542.15,32.0,32.0,0.254215
+adc,64,0,0.724,1958.14,35.96,0.5109,4843.58,64.0,64.0,0.484358
+adc,128,0,0.724,987.8,9.83,1.0124,10000.0,128.0,128.0,1.0
+adc+rerank100,1,100,0.444,34749.16,1474.13,0.0288,92.14,1.0,1.0,0.009214
+adc+rerank100,2,100,0.642,23794.7,1922.63,0.0423,176.92,2.0,2.0,0.017692
+adc+rerank100,4,100,0.808,17062.27,731.67,0.0587,343.31,4.0,4.0,0.034331
+adc+rerank100,8,100,0.925,11028.56,155.81,0.0907,665.55,8.0,8.0,0.066555
+adc+rerank100,16,100,0.988,6292.74,46.57,0.1589,1304.53,16.0,16.0,0.130453
+adc+rerank100,32,100,0.999,3273.8,326.18,0.3095,2542.15,32.0,32.0,0.254215
+adc+rerank100,64,100,1.0,1783.33,49.73,0.5612,4843.58,64.0,64.0,0.484358
+adc+rerank100,128,100,1.0,932.65,19.42,1.0727,10000.0,128.0,128.0,1.0
+adc-no-precompute,1,0,0.403,9844.81,92.91,0.1016,92.14,1.0,1.0,0.009214
+adc-no-precompute,2,0,0.548,4995.02,23.25,0.2002,176.92,2.0,2.0,0.017692
+adc-no-precompute,4,0,0.648,2418.58,53.73,0.4137,343.31,4.0,4.0,0.034331
+adc-no-precompute,8,0,0.7,1266.42,24.2,0.7899,665.55,8.0,8.0,0.066555
+adc-no-precompute,16,0,0.723,627.96,23.84,1.5949,1304.53,16.0,16.0,0.130453
+adc-no-precompute,32,0,0.724,323.51,10.06,3.0942,2542.15,32.0,32.0,0.254215
+adc-no-precompute,64,0,0.724,159.19,3.41,6.2848,4843.58,64.0,64.0,0.484358
+adc-no-precompute,128,0,0.724,77.07,3.46,13.0015,10000.0,128.0,128.0,1.0
+numpy-brute-force,0,0,1.0,11176.25,1141.73,0.0905,10000.0,0.0,0.0,1.0
