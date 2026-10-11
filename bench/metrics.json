@@ -22,6 +22,10 @@
     "original_mb": 5.12
   },
   "quality": {
+    "adc_max_relative_error": 2.95e-07,
+    "precompute_identical_id_nprobe_values": 8,
+    "precompute_max_scaled_distance_diff": 1.325e-06,
+    "precompute_nprobe_values_compared": 8,
     "residual_reconstruction_error": 12071.06
   },
   "recall": {
@@ -45,33 +49,33 @@
     "nprobe8": 0.925
   },
   "timing_not_gated": {
-    "build_seconds": 6.629,
+    "build_seconds": 7.965,
     "qps": {
-      "adc+rerank100.nprobe1": 34749.16,
-      "adc+rerank100.nprobe128": 932.65,
-      "adc+rerank100.nprobe16": 6292.74,
-      "adc+rerank100.nprobe2": 23794.7,
-      "adc+rerank100.nprobe32": 3273.8,
-      "adc+rerank100.nprobe4": 17062.27,
-      "adc+rerank100.nprobe64": 1783.33,
-      "adc+rerank100.nprobe8": 11028.56,
-      "adc-no-precompute.nprobe1": 9844.81,
-      "adc-no-precompute.nprobe128": 77.07,
-      "adc-no-precompute.nprobe16": 627.96,
-      "adc-no-precompute.nprobe2": 4995.02,
-      "adc-no-precompute.nprobe32": 323.51,
-      "adc-no-precompute.nprobe4": 2418.58,
-      "adc-no-precompute.nprobe64": 159.19,
-      "adc-no-precompute.nprobe8": 1266.42,
-      "adc.nprobe1": 68553.2,
-      "adc.nprobe128": 987.8,
-      "adc.nprobe16": 7203.19,
-      "adc.nprobe2": 43525.23,
-      "adc.nprobe32": 3793.61,
-      "adc.nprobe4": 24901.69,
-      "adc.nprobe64": 1958.14,
-      "adc.nprobe8": 13960.09,
-      "numpy-brute-force.nprobe0": 11176.25
+      "adc+rerank100.nprobe1": 36139.58,
+      "adc+rerank100.nprobe128": 864.47,
+      "adc+rerank100.nprobe16": 6443.18,
+      "adc+rerank100.nprobe2": 23744.72,
+      "adc+rerank100.nprobe32": 3474.04,
+      "adc+rerank100.nprobe4": 17330.62,
+      "adc+rerank100.nprobe64": 1884.34,
+      "adc+rerank100.nprobe8": 10917.01,
+      "adc-no-precompute.nprobe1": 10173.15,
+      "adc-no-precompute.nprobe128": 80.57,
+      "adc-no-precompute.nprobe16": 695.47,
+      "adc-no-precompute.nprobe2": 5255.06,
+      "adc-no-precompute.nprobe32": 339.95,
+      "adc-no-precompute.nprobe4": 2565.23,
+      "adc-no-precompute.nprobe64": 167.13,
+      "adc-no-precompute.nprobe8": 1330.98,
+      "adc.nprobe1": 59136.6,
+      "adc.nprobe128": 1008.87,
+      "adc.nprobe16": 7487.6,
+      "adc.nprobe2": 43029.15,
+      "adc.nprobe32": 3810.33,
+      "adc.nprobe4": 25727.92,
+      "adc.nprobe64": 2008.53,
+      "adc.nprobe8": 14422.19,
+      "numpy-brute-force.nprobe0": 12498.88
     }
   }
 }

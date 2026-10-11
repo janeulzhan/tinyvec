@@ -1,5 +1,7 @@
 # tinyvec
 
+[![ci](https://github.com/janeulzhan/tinyvec/actions/workflows/ci.yml/badge.svg)](https://github.com/janeulzhan/tinyvec/actions/workflows/ci.yml)
+
 An IVF plus product-quantization vector index, written from scratch in Python with numpy.
 
 Approximate nearest-neighbour search where the interesting part is not the index
@@ -68,17 +70,23 @@ queries; mean and population standard deviation of queries per second.
 
 | `nprobe` | QPS, ADC | QPS, ADC + rerank 100 | QPS without precomputed tables | precompute speedup |
 | --- | --- | --- | --- | --- |
-| 1 | 68553 ± 1456 | 34749 ± 1474 | 9845 ± 93 | 7.0x |
-| 2 | 43525 ± 1219 | 23795 ± 1923 | 4995 ± 23 | 8.7x |
-| 4 | 24902 ± 863 | 17062 ± 732 | 2419 ± 54 | 10.3x |
-| 8 | 13960 ± 161 | 11029 ± 156 | 1266 ± 24 | 11.0x |
-| 16 | 7203 ± 131 | 6293 ± 47 | 628 ± 24 | 11.5x |
-| 32 | 3794 ± 31 | 3274 ± 326 | 324 ± 10 | 11.7x |
-| 64 | 1958 ± 36 | 1783 ± 50 | 159 ± 3 | 12.3x |
-| 128 | 988 ± 10 | 933 ± 19 | 77 ± 4 | 12.8x |
+| 1 | 59137 ± 13132 | 36140 ± 1055 | 10173 ± 343 | 5.8x |
+| 2 | 43029 ± 1712 | 23745 ± 729 | 5255 ± 90 | 8.2x |
+| 4 | 25728 ± 566 | 17331 ± 788 | 2565 ± 60 | 10.0x |
+| 8 | 14422 ± 196 | 10917 ± 165 | 1331 ± 37 | 10.8x |
+| 16 | 7488 ± 149 | 6443 ± 72 | 695 ± 6 | 10.8x |
+| 32 | 3810 ± 92 | 3474 ± 39 | 340 ± 14 | 11.2x |
+| 64 | 2009 ± 56 | 1884 ± 38 | 167 ± 5 | 12.0x |
+| 128 | 1009 ± 20 | 864 ± 77 | 81 ± 5 | 12.5x |
 
-Index build time was 6.63 s. For reference, exact numpy brute force over the
-same data reaches 11176 ± 1142 QPS at recall 1.0.
+Index build time was 7.97 s. For reference, exact numpy brute force over the
+same data reaches 12499 ± 594 QPS at recall 1.0.
+
+Most rows hold their standard deviation under 5 percent of the mean. The
+`nprobe=1` ADC row is the exception at 22 percent, and the reason is structural
+rather than mysterious: one pass over 100 queries takes about 1.7 ms there, which
+is short enough that operating-system jitter is a visible fraction of the
+measurement. The slower configurations are correspondingly steadier.
 
 ### Reading that reference row honestly
 
@@ -88,12 +96,19 @@ BLAS matrix product, which is about as efficient as float32 arithmetic gets. The
 honest summary is:
 
 - Below roughly 0.81 recall, tinyvec is faster. At `nprobe=4` with reranking it
-  delivers <!--bench:recall_rerank.nprobe4-->0.8080<!--/bench--> recall at
-  roughly 1.5x brute-force throughput, and at `nprobe=1` it is about 6x faster
-  at <!--bench:recall.nprobe1-->0.4030<!--/bench--> recall.
+  delivers <!--bench:recall_rerank.nprobe4-->0.8080<!--/bench--> recall at 1.39x
+  brute-force throughput, at `nprobe=2` it is 1.90x faster at
+  <!--bench:recall_rerank.nprobe2-->0.6420<!--/bench-->, and at `nprobe=1` it is
+  4.7x faster at <!--bench:recall.nprobe1-->0.4030<!--/bench--> recall.
 - Above that, brute force wins on wall-clock. Reaching
-  <!--bench:recall_rerank.nprobe16-->0.9880<!--/bench--> costs `nprobe=16`, and
-  at 6293 QPS that is slower than simply scoring everything.
+  <!--bench:recall_rerank.nprobe8-->0.9250<!--/bench--> runs at 0.87x brute
+  force, and <!--bench:recall_rerank.nprobe16-->0.9880<!--/bench--> at 0.52x.
+
+Those ratios are stable even though the absolute throughput is not. Measured
+three more times back to back in a single quiet process, the ratio at
+`nprobe=4` with reranking stayed within 1.27x to 1.30x and the ratio at
+`nprobe=8` within 0.81x to 0.83x, so the crossover sits between 0.81 and 0.93
+recall rather than being an artifact of one noisy run.
 
 That crossover is a property of n = 10,000, not of IVF-PQ. The per-query Python
 overhead is a fixed cost paid `nprobe` times, while brute force amortizes a
@@ -139,7 +154,7 @@ git clone https://github.com/janeulzhan/tinyvec.git
 cd tinyvec
 python3 -m pip install -e ".[dev]"
 
-python3 -m pytest -m "not slow" -q      # 221 tests
+python3 -m pytest -m "not slow" -q      # 230 tests
 tinyvec info                            # describe the vendored dataset
 tinyvec bench --nprobe 1,4,16,64        # recall and QPS sweep
 ```
@@ -232,10 +247,22 @@ sum, the first two terms involve only the codebooks and the coarse centroids, so
 they fold into one `(nlist, m, 256)` table built once at `fit()` time; only the
 third depends on the query, and it is one `(m, 256)` build per query rather than
 per list. The per-list table build becomes a single array addition, worth the
-7.0x to 12.8x in the throughput table above. It is pure algebra, so recall does
-not move: both paths return byte-identical ids at every `nprobe`, with distances
-agreeing to 1.3e-06 relative, and `tests/test_precompute.py` asserts exactly
-that.
+5.8x to 12.5x in the throughput table above.
+
+It is pure algebra, so retrieval does not move at all. The benchmark checks this
+on every run and reports it: returned ids are byte-identical at
+<!--bench:quality.precompute_identical_id_nprobe_values-->8<!--/bench--> of
+<!--bench:quality.precompute_nprobe_values_compared-->8<!--/bench--> swept
+`nprobe` values. Distance *values* differ only by float32 rounding, since the
+two routes sum the same terms in a different order; the measured worst is
+<!--bench:quality.precompute_max_scaled_distance_diff-->1.325e-06<!--/bench-->
+of the largest returned distance.
+
+What `tests/test_precompute.py` asserts, precisely: that the ids are identical,
+and that the scaled distance difference stays below 5e-05. That ceiling is
+deliberately close to the worst value ever measured, and a companion test fails
+if it ever drifts to more than 10x the measured worst, because a bound far
+looser than reality is exactly what lets prose overstate a test.
 
 ## Benchmark disclosure
 
@@ -251,7 +278,7 @@ that.
 | Metric | squared Euclidean |
 | k | <!--bench:dataset.k-->10<!--/bench--> |
 | Index params | `nlist=128`, `m=16`, `nbits=8`, `kmeans_iter=25`, `seed=42` |
-| Build time | 6.63 s |
+| Build time | 7.97 s |
 | Timing protocol | 1 warmup pass, 10 timed passes, mean and population stddev |
 | Raw data | [`bench/results.csv`](bench/results.csv), harness at [`bench/bench.py`](bench/bench.py) |
 
@@ -262,13 +289,23 @@ files, not a subsample, and it gets the corpus to 3.4 MB.
 `scripts/download_siftsmall.py` re-derives it from the INRIA tarball and checks
 its SHA-256, so the vendored copy is verifiable rather than merely asserted.
 
-The in-repo brute force was validated against the published ground truth: the
-returned neighbour sets agree at every k from 1 to 100, and ordering agrees
-exactly to k=20. Of 10,000 cells, 18 permute deeper in the list, and
-`tests/test_exact.py` proves every one of them is a pair of vectors at identical
-distance rather than a disagreement. The tie margin at k=10 is 6.0 squared
-units, which is comfortably positive, so recall@10 on this dataset is a
-well-defined quantity. That check runs before any recall number is reported.
+The in-repo brute force was validated against the published ground truth on two
+counts: the returned neighbour sets agree at every k from 1 to 100, and the
+sequence of distances is identical, exactly and not approximately. The second is
+the stronger claim, and it is the one that survives ties.
+
+Exact id ordering is not claimed, because it is not portable. Where two base
+vectors sit at the same distance from a query, which sorts first depends on
+float32 accumulation order and so on the BLAS build; 18 of 10,000 cells permute
+on the authoring machine and a different number will on yours.
+`tests/test_exact.py` asserts the property rather than the count: any id that
+differs from the published file must be a vector at exactly the same distance.
+An earlier version pinned the ordering to k=20, which passed locally and failed
+in CI on Linux.
+
+The tie margin at k=10 is 6.0 squared units, which is comfortably positive, so
+recall@10 on this dataset is a well-defined quantity. That check runs before any
+recall number is reported.
 
 ## What CI gates, and what it does not
 
@@ -313,11 +350,20 @@ treat the crossover as a fact about this dataset only.
 **The benchmark machine was not quiesced.** A browser was consuming roughly 160%
 CPU during development, and microbenchmarks came back visibly bimodal as a
 result. That is the reason for the warmup pass, the 10 timed runs, and reporting
-standard deviation rather than a best-of-N. Some of those standard deviations
-are still wide: 1923 on 23795 QPS at `nprobe=2`, for instance. The deterministic
-columns are unaffected, which is precisely why they are the ones CI gates. It
-also cost one wrong claim: an early docstring asserted a 2x win for a flattened
-table gather, and measurement showed it was actually slower, so it was deleted.
+standard deviation rather than a best-of-N. The widest remaining spread is the
+22 percent on the `nprobe=1` ADC row, explained above. An earlier run of the
+same harness produced reranked throughput roughly 40 percent below the committed
+numbers with standard deviations near 30 percent; that run was discarded as
+load-polluted after the ratios it implied were contradicted by three stable
+back-to-back measurements, which is the kind of judgement call a wall-clock
+number forces and a deterministic one does not.
+
+This is also why the deterministic columns are the ones CI gates. Measurement
+noise has cost this repository two wrong claims so far, both caught and both
+recorded here: an early docstring asserted a 2x win for a flattened table gather
+when measurement showed it was slower, and a k-means test asserted an inertia
+invariant that float32 cancellation makes false in the regime the test itself
+constructed. The second one passed locally and failed in CI on a different BLAS.
 
 **Recall is measured on 100 queries.** SIFT-small ships exactly 100, so a recall
 of 0.9250 is 925 hits out of 1000 judgements and carries a standard error near
@@ -330,6 +376,18 @@ and loads it eagerly), cosine and inner-product metrics are not implemented,
 `nbits` is fixed at 8 by the uint8 code layout, and there is no OPQ rotation,
 which typically recovers a few points of recall at these settings by
 decorrelating the subspaces before quantization.
+
+**Float32 distance arithmetic has a precision floor.** Distances come from the
+`|a|^2 - 2a.b + |b|^2` expansion so the whole thing is one matrix product, and
+that expansion loses relative accuracy as `|a|, |b|` grow against `|a - b|`.
+Tight clusters far from the origin are the pathological case: at 5-dimensional
+clusters of radius 0.01 centred 20 units out, the relative error on the small
+distances reaches 0.71, which is not a usable distance. `squared_distances`
+documents the measured error across that whole regime, a test pins it, and
+k-means sidesteps the worst consequence by computing inertia from direct float64
+residuals rather than from the expanded distances. Real embedding data, SIFT
+included, sits at the well-conditioned end where the error is near 1e-07, but if
+you bring your own data of that shape, centre it first.
 
 **Reranking trades away the headline memory win.** It needs the original float32
 vectors, so an index with `rerank` enabled stores them and the 32x compression
@@ -353,15 +411,21 @@ tinyvec/datasets.py  vendored SIFT-small loader, synthetic generator
 tinyvec/cli.py       build / query / bench / info
 bench/bench.py       the disclosed benchmark; bench/results.csv is its output
 tools/benchlock.py   locks this README's numbers to bench/metrics.json
-tests/               221 tests; test_adc.py is the one that matters most
+tests/               230 tests; test_adc.py is the one that matters most
 ```
 
 `tests/test_adc.py` is worth opening first. The entire index rests on the claim
 that a sum of table lookups equals a real distance, so that claim is checked
 against a distance recomputed from scratch on the decoded vectors, against a
-naive Python double loop over the table, and across four values of `m`. The
-worst relative error across that file is 2.3e-06, which is float32 rounding
-rather than an approximation gap.
+naive Python double loop over the table, and across four values of `m`. Those
+assertions are set at 1e-05 relative.
+
+The benchmark then re-measures the same identity on the real index, scoring 25
+SIFT queries against all <!--bench:dataset.n-->10000<!--/bench--> codes with a
+float64 reference, and reports the worst relative error:
+<!--bench:quality.adc_max_relative_error-->2.95e-07<!--/bench-->. That is
+float32 rounding rather than an approximation gap, and it comes out of
+`bench/bench.py` on every run rather than from a figure typed in once.
 
 ## References
 

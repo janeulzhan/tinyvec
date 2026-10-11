@@ -51,7 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tinyvec.datasets import load_siftsmall  # noqa: E402
 from tinyvec.exact import brute_force, recall_at_k, tie_margin  # noqa: E402
 from tinyvec.index import IVFPQIndex  # noqa: E402
-from tinyvec.kmeans import assign  # noqa: E402
+from tinyvec.kmeans import assign, squared_distances  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CSV = REPO_ROOT / "bench" / "results.csv"
@@ -63,6 +63,10 @@ M = 16
 K = 10
 KMEANS_ITER = 25
 RERANK = 100
+# Queries used for the ADC exactness cross-check. Each one is scored against
+# every code in float64, so this is quadratic in a way the rest of the harness
+# is not; 25 is plenty to establish a worst case.
+ADC_CHECK_QUERIES = 25
 
 
 def _sysctl(name: str) -> str:
@@ -148,6 +152,53 @@ def summarize(elapsed: list[float], n_queries: int) -> tuple[float, float, float
     return mean, stddev, latency
 
 
+def verify_adc_exactness(index: IVFPQIndex, queries: np.ndarray, base: np.ndarray) -> float:
+    """Worst relative gap between an ADC score and a from-scratch distance.
+
+    The index's whole cost model rests on a table-lookup sum equalling a real
+    distance. This recomputes that distance in float64 directly on the decoded
+    residuals and returns the worst relative disagreement, so the figure quoted
+    in the README comes out of a committed command rather than a notebook.
+    """
+    labels, _ = assign(base, index.centroids)
+    codes = index.pq.encode(base - index.centroids[labels])
+    decoded = index.pq.decode(codes).astype(np.float64)
+
+    coarse = squared_distances(queries[:ADC_CHECK_QUERIES], index.centroids)
+    nearest = np.argmin(coarse, axis=1)
+    worst = 0.0
+    for qi in range(min(ADC_CHECK_QUERIES, queries.shape[0])):
+        residual_query = queries[qi] - index.centroids[nearest[qi]]
+        table = index.pq.distance_tables(residual_query[None, :])[0]
+        got = index.pq.adc(codes, table)
+        want = ((decoded - residual_query.astype(np.float64)) ** 2).sum(axis=1)
+        worst = max(worst, float(np.max(np.abs(got - want) / np.maximum(want, 1e-9))))
+    return worst
+
+
+def verify_precompute_agreement(
+    fast: IVFPQIndex, slow: IVFPQIndex, queries: np.ndarray, nprobe_sweep
+) -> tuple[float, int, int]:
+    """Compare the precomputed-table path against the reference path.
+
+    Returns:
+        ``(worst_scaled_distance_diff, n_identical, n_compared)`` where the
+        first is the largest distance difference as a fraction of the largest
+        returned distance, and the next two count how many nprobe values
+        returned byte-identical ids.
+    """
+    worst = 0.0
+    identical = 0
+    for nprobe in nprobe_sweep:
+        fast_ids, fast_d = fast.search(queries, K, nprobe=nprobe)
+        slow_ids, slow_d = slow.search(queries, K, nprobe=nprobe)
+        identical += int(np.array_equal(fast_ids, slow_ids))
+        finite = np.isfinite(slow_d)
+        scale = max(float(np.max(np.abs(slow_d[finite]))), 1.0)
+        worst = max(worst, float(np.max(np.abs(fast_d[finite] - slow_d[finite]))) / scale)
+    return worst, identical, len(nprobe_sweep)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", type=int, default=10, help="timed runs per configuration")
@@ -214,6 +265,15 @@ def main() -> int:
     print(f"  compression (codes only) {memory['compression_ratio']:.1f}x")
     print(f"  compression (all index)  {memory['compression_ratio_with_overhead']:.1f}x")
     print(f"  residual recon error     {residual_error:.2f} mean squared")
+
+    adc_error = verify_adc_exactness(index, dataset.queries, dataset.base)
+    pre_diff, pre_identical, pre_total = verify_precompute_agreement(
+        index, reference, dataset.queries, nprobe_sweep
+    )
+    print(f"\n  ADC vs direct recompute  max relative error {adc_error:.3e} "
+          f"({ADC_CHECK_QUERIES} queries x {dataset.n} codes, float64 reference)")
+    print(f"  precompute vs reference  identical ids at {pre_identical}/{pre_total} nprobe values, "
+          f"max scaled distance diff {pre_diff:.3e}")
 
     rows: list[Row] = []
     n_queries = dataset.queries.shape[0]
@@ -298,6 +358,9 @@ def main() -> int:
             ["# compression_ratio_with_overhead", round(memory["compression_ratio_with_overhead"], 4)]
         )
         writer.writerow(["# residual_reconstruction_error", round(residual_error, 4)])
+        writer.writerow(["# adc_max_relative_error", f"{adc_error:.6e}"])
+        writer.writerow(["# precompute_max_scaled_distance_diff", f"{pre_diff:.6e}"])
+        writer.writerow(["# precompute_identical_id_nprobe_values", pre_identical, "of", pre_total])
         writer.writerow(["# single_threaded", True])
         writer.writerow(list(asdict(rows[0]).keys()))
         for row in rows:
@@ -321,7 +384,13 @@ def main() -> int:
                 "original_mb": round(memory["original_float32_bytes"] / 1e6, 4),
                 "codes_mb": round(memory["pq_code_bytes"] / 1e6, 4),
             },
-            "quality": {"residual_reconstruction_error": round(residual_error, 2)},
+            "quality": {
+                "residual_reconstruction_error": round(residual_error, 2),
+                "adc_max_relative_error": float(f"{adc_error:.4g}"),
+                "precompute_max_scaled_distance_diff": float(f"{pre_diff:.4g}"),
+                "precompute_identical_id_nprobe_values": pre_identical,
+                "precompute_nprobe_values_compared": pre_total,
+            },
             "dataset": {"n": dataset.n, "dim": dataset.dim, "queries": n_queries, "k": K},
             "timing_not_gated": {
                 "build_seconds": round(build_seconds, 3),

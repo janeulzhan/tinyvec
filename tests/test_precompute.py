@@ -18,6 +18,20 @@ from tinyvec.index import IVFPQIndex
 
 PARAMS = dict(nlist=16, m=8, nprobe=4, seed=0, kmeans_iter=10)
 
+# The strong claim is that returned ids are byte-identical, asserted separately
+# below. Distance *values* differ by float32 rounding, because the two routes
+# sum the same terms in a different order.
+#
+# Measured worst, as a fraction of the largest returned distance, Apple M4 with
+# numpy 2.4.6, over nprobe in (1, 2, 4, 8, 16):
+#   this fixture (gaussian mixture, dim=32, m=8):  1.954e-05
+#   SIFT-small   (dim=128, m=16, nlist=128):       1.325e-06
+# The ceiling is set just above the worse of the two, leaving about 2.6x. An
+# earlier value of 1e-4 was roughly 5x looser than anything measured, which made
+# it impossible to describe the test honestly in prose.
+MAX_SCALED_DISTANCE_DIFF = 5e-5
+MEASURED_SCALED_DISTANCE_DIFF = 1.954e-05
+
 
 @pytest.fixture(scope="module")
 def dataset():
@@ -50,13 +64,44 @@ def test_returned_ids_are_identical(pair, dataset, nprobe):
     assert np.array_equal(fast_ids, slow_ids)
 
 
-@pytest.mark.parametrize("nprobe", [1, 4, 16])
+@pytest.mark.parametrize("nprobe", [1, 2, 4, 8, 16])
 def test_distances_agree_to_float32_rounding(pair, dataset, nprobe):
+    """Bounded at MAX_SCALED_DISTANCE_DIFF, which is just above the worst value
+    ever measured rather than a round number chosen for comfort."""
     fast, slow = pair
     _, fast_d = fast.search(dataset.queries, 10, nprobe=nprobe)
     _, slow_d = slow.search(dataset.queries, 10, nprobe=nprobe)
-    scale = max(float(np.max(slow_d[np.isfinite(slow_d)])), 1.0)
-    assert np.max(np.abs(fast_d - slow_d)) / scale < 1e-4
+    finite = np.isfinite(slow_d)
+    scale = max(float(np.max(np.abs(slow_d[finite]))), 1.0)
+    worst = float(np.max(np.abs(fast_d[finite] - slow_d[finite]))) / scale
+    assert worst < MAX_SCALED_DISTANCE_DIFF, (
+        f"nprobe={nprobe}: scaled distance difference {worst:.3e} exceeded the "
+        f"ceiling {MAX_SCALED_DISTANCE_DIFF:.1e} (measured worst when sealed: "
+        f"{MEASURED_SCALED_DISTANCE_DIFF:.3e})"
+    )
+
+
+def test_the_declared_ceiling_is_close_to_what_is_measured(pair, dataset):
+    """Guards the ceiling itself against drifting into meaninglessness.
+
+    A bound far looser than reality is what lets prose overstate a test, which
+    is the failure this file exists to prevent. If the real worst case ever
+    improves or degrades substantially, this fails and forces both the constant
+    and the README sentence quoting it to be revisited together.
+    """
+    fast, slow = pair
+    worst = 0.0
+    for nprobe in (1, 2, 4, 8, 16):
+        _, fast_d = fast.search(dataset.queries, 10, nprobe=nprobe)
+        _, slow_d = slow.search(dataset.queries, 10, nprobe=nprobe)
+        finite = np.isfinite(slow_d)
+        scale = max(float(np.max(np.abs(slow_d[finite]))), 1.0)
+        worst = max(worst, float(np.max(np.abs(fast_d[finite] - slow_d[finite]))) / scale)
+    assert worst == pytest.approx(MEASURED_SCALED_DISTANCE_DIFF, rel=0.5), worst
+    assert MAX_SCALED_DISTANCE_DIFF < 10.0 * worst, (
+        f"ceiling {MAX_SCALED_DISTANCE_DIFF:.1e} is more than 10x the measured "
+        f"worst {worst:.3e}; tighten it or the prose quoting it is misleading"
+    )
 
 
 def test_recall_is_identical(pair, dataset):

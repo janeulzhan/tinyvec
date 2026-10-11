@@ -65,6 +65,14 @@ TOLERANCES: dict[str, float] = {
     "recall_rerank": 0.05,
     "candidates": 0.05,
     "quality.residual_reconstruction_error": 0.10,
+    # Float32 rounding residuals. These vary with BLAS accumulation order more
+    # than recall does, so they get room; they are quoted in the README as
+    # orders of magnitude, not as precise values.
+    "quality.adc_max_relative_error": 0.50,
+    "quality.precompute_max_scaled_distance_diff": 0.50,
+    # Counts of nprobe values returning byte-identical ids. Exact integers.
+    "quality.precompute_identical_id_nprobe_values": 0.0,
+    "quality.precompute_nprobe_values_compared": 0.0,
     "memory.compression_ratio": 0.0,
     "memory.compression_ratio_with_overhead": 0.0,
     "memory.original_mb": 0.0,

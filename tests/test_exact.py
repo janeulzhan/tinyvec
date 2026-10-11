@@ -178,25 +178,43 @@ def test_reproduces_published_siftsmall_groundtruth():
     """The strongest correctness evidence available: our exact search is checked
     against ground truth published by someone else, computed independently.
 
-    Neighbour sets agree at every k up to 100. Exact ordering agrees to k=20;
-    beyond that a handful of cells permute, and the companion test below
-    establishes that every one of those is a distance tie rather than a
-    disagreement.
+    Two claims, both portable. Neighbour sets agree at every k up to 100, and
+    the sequence of *distances* is identical, which is the stronger statement
+    and the one that survives ties.
+
+    Exact id ordering is deliberately not asserted. Where two base vectors are
+    equidistant from a query, which one sorts first depends on float32
+    accumulation order and therefore on the BLAS build; an earlier version of
+    this test pinned the ordering to k=20, passed on macOS Accelerate, and
+    failed in CI on Linux. Distance-sequence equality says everything the
+    ordering claim was trying to say, without depending on how ties break.
     """
     ds = load_siftsmall()
     ids, _ = brute_force(ds.base, ds.queries, 100)
     for k in (1, 5, 10, 20, 50, 100):
         for qi in range(ds.queries.shape[0]):
             assert set(ids[qi, :k].tolist()) == set(ds.groundtruth[qi, :k].tolist()), (k, qi)
-    assert np.array_equal(ids[:, :20], ds.groundtruth[:, :20])
+
+    base = ds.base.astype(np.float64)
+    for qi in range(ds.queries.shape[0]):
+        query = ds.queries[qi].astype(np.float64)
+        ours = ((base[ids[qi]] - query) ** 2).sum(axis=1)
+        theirs = ((base[ds.groundtruth[qi]] - query) ** 2).sum(axis=1)
+        assert np.array_equal(ours, theirs), qi
 
 
 def test_every_disagreement_with_published_groundtruth_is_a_distance_tie():
+    """Any id we return that differs from the published file must be a vector at
+    exactly the same distance, never a genuinely different neighbour.
+
+    How many cells differ, and whether any differ at all, depends on tie-break
+    order and so varies by platform (18 of 10,000 on the authoring machine).
+    That count is therefore not asserted; only the property is.
+    """
     ds = load_siftsmall()
     ids, _ = brute_force(ds.base, ds.queries, 100)
     base = ds.base.astype(np.float64)
     mismatches = np.argwhere(ids != ds.groundtruth)
-    assert mismatches.size > 0, "expected a few tie permutations deep in the list"
     for qi, col in mismatches:
         q = ds.queries[qi].astype(np.float64)
         ours = ((base[ids[qi, col]] - q) ** 2).sum()
